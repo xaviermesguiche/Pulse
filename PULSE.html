@@ -349,6 +349,8 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: #c4b5fd; border-radius: 2px; }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>if(window['pdfjsLib']){pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';}</script>
 </head>
 <body>
 
@@ -409,6 +411,8 @@
         </table>
       </div>
       <button class="add-btn btn-slate" onclick="openAddCours()">＋ Nouvelle Matière</button>
+      <button class="add-btn btn-purple" onclick="document.getElementById('pdfInput').click()">📄 Importer PDF (EDT)</button>
+      <input type="file" id="pdfInput" accept="application/pdf" style="display:none" onchange="importPlanningPdf(this.files[0])">
     </div>
 
   </div>
@@ -492,24 +496,9 @@
 const EXAM_KEY  = 'pulse_exams';
 const COURS_KEY = 'pulse_cours';
 
-const EXAM_INITIAL = [
-  {id:'e2', date:'2026-04-10', subject:'CRM206', type:'DST',             progress:null},
-  {id:'e3', date:'2026-04-30', subject:'ANG330', type:'Travail à rendre', progress:'pas fait'},
-  {id:'e4', date:'2026-05-15', subject:'CRM202', type:'Devoir',           progress:'pas fait'},
-  {id:'e8', date:'2026-05-15', subject:'UAIP01', type:'Devoir',           progress:'pas fait'},
-  {id:'e5', date:'2026-06-11', subject:'CRM203', type:'DST',             progress:null},
-  {id:'e6', date:'2026-06-12', subject:'CRM204', type:'DST',             progress:null},
-  {id:'e7', date:'2026-06-16', subject:'CRM205', type:'Soutenance',      progress:null},
-];
+const EXAM_INITIAL = [];
 
-const COURS_INITIAL = [
-  {id:'c1', subject:'CRM201', sessions:['2026-05-04']},
-  {id:'c2', subject:'CRM202', sessions:['2026-05-15']},
-  {id:'c3', subject:'CRM203', sessions:['2026-04-09','2026-06-11']},
-  {id:'c4', subject:'CRM204', sessions:['2026-04-08','2026-04-24','2026-05-05','2026-05-13','2026-05-22','2026-05-29','2026-06-12']},
-  {id:'c5', subject:'CRM205', sessions:['2026-04-14','2026-04-21','2026-05-12','2026-05-19','2026-05-26','2026-06-16']},
-  {id:'c6', subject:'CRM206', sessions:['2026-04-10']},
-];
+const COURS_INITIAL = [];
 
 function loadExams()  { try { return JSON.parse(localStorage.getItem(EXAM_KEY))  || EXAM_INITIAL.map(e=>({...e})); } catch { return EXAM_INITIAL.map(e=>({...e})); } }
 function loadCours()  { try { return JSON.parse(localStorage.getItem(COURS_KEY)) || COURS_INITIAL.map(c=>({...c})); } catch { return COURS_INITIAL.map(c=>({...c})); } }
@@ -552,6 +541,136 @@ function futureSessions(sessions) {
   return sessions.filter(s => s >= todayStr).sort();
 }
 function uid() { return 'id_' + Date.now() + '_' + Math.random().toString(36).slice(2,6); }
+
+// ══════════════════════════════════════
+// IMPORT PDF CNAM / GESCICC
+// ══════════════════════════════════════
+function isoFromFR(d,m,y){
+  y = y.length===2 ? ('20'+y) : y;
+  return y+'-'+m+'-'+d;
+}
+function near(a,b,tol){ return Math.abs(a-b)<=tol; }
+
+async function importPlanningPdf(file){
+  if(!file) return;
+  if(!window.pdfjsLib){ showToast('pdf.js introuvable (réseau)'); return; }
+  try{
+    showToast('Lecture du PDF…');
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({data: buf}).promise;
+    const found = {}; // code -> Set of dates
+    const dateRe = /^(\d{2})\/(\d{2})\/(\d{2,4})$/;
+    const codeRe = /\b([A-Z]{2,4}\d{2,3}|RB0CR\d)\b/;
+    const timeRe = /\d{2}:\d{2}\s*-\s*\d{2}:\d{2}/;
+
+    for(let p=1;p<=pdf.numPages;p++){
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      const items = content.items.map(it=>({
+        t: String(it.str||'').trim(),
+        x: it.transform[4],
+        y: it.transform[5]
+      })).filter(it=>it.t);
+
+      // dates as column anchors
+      const dates = items.filter(it=>dateRe.test(it.t)).map(it=>{
+        const m=it.t.match(dateRe);
+        return {iso: isoFromFR(m[1],m[2],m[3]), x:it.x, y:it.y, t:it.t};
+      });
+      if(!dates.length){
+        // fallback raw text
+        parsePlanningText(items.map(i=>i.t).join('\n'), found);
+        continue;
+      }
+
+      // cluster date header rows by y
+      dates.sort((a,b)=>b.y-a.y);
+      const headerRows=[];
+      for(const d of dates){
+        let row=headerRows.find(r=>near(r.y,d.y,8));
+        if(!row){ row={y:d.y, cols:[]}; headerRows.push(row); }
+        row.cols.push(d);
+      }
+      headerRows.forEach(r=>r.cols.sort((a,b)=>a.x-b.x));
+
+      const codes = items.filter(it=>codeRe.test(it.t) && !dateRe.test(it.t));
+      for(const c of codes){
+        const m=c.t.match(codeRe);
+        if(!m) continue;
+        const code=m[1];
+        // pick header row just above this item (larger y in PDF coords)
+        const rowsAbove = headerRows.filter(r=>r.y > c.y-5);
+        if(!rowsAbove.length) continue;
+        rowsAbove.sort((a,b)=>a.y-b.y); // closest above = smallest y still above? 
+        // PDF y increases upward, so "above on page" = larger y
+        rowsAbove.sort((a,b)=>a.y-b.y);
+        // we want the smallest y that is still >= c.y among headers? No:
+        // header is visually above content, so header.y > content.y. Closest header = min(header.y - content.y) among header.y>content.y
+        const candidates = headerRows.filter(r=>r.y > c.y + 2);
+        if(!candidates.length) continue;
+        candidates.sort((a,b)=>(a.y-c.y)-(b.y-c.y));
+        const row = candidates[0];
+        // nearest column by x
+        let best=row.cols[0], bd=Math.abs(best.x-c.x);
+        for(const col of row.cols){
+          const dist=Math.abs(col.x-c.x);
+          if(dist<bd){ bd=dist; best=col; }
+        }
+        if(!found[code]) found[code]=new Set();
+        found[code].add(best.iso);
+      }
+    }
+
+    const subjects = Object.keys(found);
+    if(!subjects.length){
+      showToast('Aucune séance lue. Vérifie que c’est le planning Cnam.');
+      document.getElementById('pdfInput').value='';
+      return;
+    }
+    let cours = loadCours();
+    let added=0, merged=0;
+    for(const sub of subjects.sort()){
+      const sessions=[...found[sub]].sort();
+      let cur=cours.find(c=>c.subject.toUpperCase()===sub.toUpperCase());
+      if(!cur){
+        cours.push({id:uid(), subject:sub, sessions});
+        added++;
+      } else {
+        const set=new Set(cur.sessions.concat(sessions));
+        cur.sessions=[...set].sort();
+        merged++;
+      }
+    }
+    saveCoursData(cours);
+    refreshAll();
+    showToast('PDF importé : '+subjects.length+' matière(s), '+added+' nouvelle(s).');
+  }catch(err){
+    console.error(err);
+    showToast('Échec lecture PDF');
+  }
+  document.getElementById('pdfInput').value='';
+}
+
+function parsePlanningText(text, found){
+  const dateRe=/(\d{2})\/(\d{2})\/(\d{2,4})/g;
+  const dates=[];
+  let m;
+  while((m=dateRe.exec(text))) dates.push(isoFromFR(m[1],m[2],m[3]));
+  // week blocks: after 7 dates, codes until next dates
+  const codeRe=/\b([A-Z]{2,4}\d{2,3}|RB0CR\d)\b/g;
+  // fallback: pair each code with nearest preceding date in text — weak
+  const tokens=text.split(/\s+/);
+  let lastDates=[];
+  for(let i=0;i<tokens.length;i++){
+    const dm=tokens[i].match(/^(\d{2})\/(\d{2})\/(\d{2,4})$/);
+    if(dm){ lastDates.push(isoFromFR(dm[1],dm[2],dm[3])); if(lastDates.length>7) lastDates=lastDates.slice(-7); continue; }
+    const cm=tokens[i].match(/^([A-Z]{2,4}\d{2,3}|RB0CR\d)$/);
+    if(cm && lastDates.length){
+      // cannot know column; skip in text fallback unless only 1 date nearby
+    }
+  }
+}
+
 
 // ══════════════════════════════════════
 // REFRESH
