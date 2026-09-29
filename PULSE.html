@@ -493,8 +493,8 @@
 // ══════════════════════════════════════
 // DONNÉES
 // ══════════════════════════════════════
-const EXAM_KEY  = 'pulse_exams';
-const COURS_KEY = 'pulse_cours';
+const EXAM_KEY  = 'pulse_exams_v2';
+const COURS_KEY = 'pulse_cours_v2';
 
 const EXAM_INITIAL = [];
 
@@ -576,8 +576,8 @@ function parseDeadlineText(text){
     if(!iso) return;
     // ignore tiny headers like print date without devoir words
     const c=(ctx||'');
-    if(!/(avant|rendu|remise|brouillon|soutenance|devoir|sondage|titre|sommaire|session|m[eé]moire|dst|examen|date limite|butoir)/i.test(c)
-       && !/(UAIP|CRM|RB0?CR)/i.test(c)) return;
+    if(!/(avant le|rendu|remise|brouillon|soutenance|sondage|titre et|sommaire|date limite|butoir|session 1|session 2|travail [àa] rendre|devoir maison)/i.test(c)) return;
+    if(/WEBCONF|TUTORAT|LECNAM\.NET|\d{2}:\d{2}\s*-\s*\d{2}:\d{2}/i.test(c)) return;
     const type=guessExamType(c);
     const subject=guessSubject(text,c);
     const key=iso+'|'+subject+'|'+type+'|'+c.slice(0,40);
@@ -662,7 +662,10 @@ async function importPlanningPdf(file){
     const buf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({data: buf}).promise;
     const {text, foundCours} = await extractPdfText(pdf);
-    const deadlineExams = parseDeadlineText(text);
+    const looksLikeEDT = /WEBCONF|TUTORAT|LECNAM\.NET|\d{2}:\d{2}\s*-\s*\d{2}:\d{2}/i.test(text)
+                      && Object.keys(foundCours).length > 0;
+    const looksLikeCalendrier = /m[eé]moire|soutenance|brouillon|avant le|date limite|UAIP0?\d/i.test(text);
+    const deadlineExams = (looksLikeEDT && !looksLikeCalendrier) ? [] : parseDeadlineText(text);
 
     const subjects = Object.keys(foundCours);
     let addedC=0, addedE=0;
@@ -1072,6 +1075,8 @@ function showToast(msg) {
 // ══════════════════════════════════════
 function resetData() {
   if (!confirm('Réinitialiser toutes les données aux valeurs par défaut ?')) return;
+  localStorage.removeItem(EXAM_KEY);
+  localStorage.removeItem(COURS_KEY);
   localStorage.removeItem('pulse_exams');
   localStorage.removeItem('pulse_cours');
   refreshAll();
